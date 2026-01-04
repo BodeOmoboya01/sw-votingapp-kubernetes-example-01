@@ -50,6 +50,14 @@ commands:
             gcloud auth activate-service-account --key-file /tmp/gcp-key.json
             gcloud config set project $GOOGLE_PROJECT_ID
 
+  install-docker-alpine:
+    description: "Install Docker CLI on Alpine-based images"
+    steps:
+      - run:
+          name: Install Docker CLI
+          command: |
+            apk add --no-cache docker-cli
+
   build-all-images:
     description: "Build all voting app Docker images"
     parameters:
@@ -276,7 +284,7 @@ jobs:
           name: Create deployment summary
           command: |
             SHORT_SHA=${CIRCLE_SHA1:0:7}
-            cat > /tmp/k8s-manifests/DOCKERHUB-README.md \<< EOF
+            cat > /tmp/k8s-manifests/DOCKERHUB-README.md << EOF
             # DockerHub Voting App Deployment
             
             ## Build Information
@@ -333,6 +341,7 @@ jobs:
           at: /tmp
       - setup_remote_docker:
           docker_layer_caching: true
+      - install-docker-alpine
       - setup-gcp
       - run:
           name: Load Docker images
@@ -426,7 +435,7 @@ jobs:
             REPO_NAME="votingapp-${ENVIRONMENT}"
             REGISTRY="us-central1-docker.pkg.dev/$GOOGLE_PROJECT_ID/$REPO_NAME"
             
-            cat > /tmp/k8s-manifests/GCP-${ENVIRONMENT}-README.md \<< EOF
+            cat > /tmp/k8s-manifests/GCP-${ENVIRONMENT}-README.md << EOF
             # GCP ${ENVIRONMENT} Voting App Deployment
             
             ## Build Information
@@ -586,7 +595,7 @@ jobs:
             AWS_ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text)
             ECR_REGISTRY="$AWS_ACCOUNT_ID.dkr.ecr.$AWS_DEFAULT_REGION.amazonaws.com"
             
-            cat > /tmp/k8s-manifests/AWS-${ENVIRONMENT}-README.md \<< EOF
+            cat > /tmp/k8s-manifests/AWS-${ENVIRONMENT}-README.md << EOF
             # AWS ${ENVIRONMENT} Voting App Deployment
             
             ## Build Information
