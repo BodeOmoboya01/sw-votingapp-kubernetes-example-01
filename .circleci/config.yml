@@ -276,7 +276,7 @@ jobs:
           name: Create deployment summary
           command: |
             SHORT_SHA=${CIRCLE_SHA1:0:7}
-            cat > /tmp/k8s-manifests/DOCKERHUB-README.md << EOF
+            cat > /tmp/k8s-manifests/DOCKERHUB-README.md \<< EOF
             # DockerHub Voting App Deployment
             
             ## Build Information
