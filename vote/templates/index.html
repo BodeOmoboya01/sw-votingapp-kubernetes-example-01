@@ -1,0 +1,241 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Vote - {{ option_a }} vs {{ option_b }}</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Space+Mono:wght@400;700&family=Work+Sans:wght@300;500;700&display=swap" rel="stylesheet">
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        :root {
+            --color-a: #2563eb;
+            --color-a-hover: #1d4ed8;
+            --color-b: #dc2626;
+            --color-b-hover: #b91c1c;
+            --bg-dark: #0a0a0f;
+            --text-light: #f8fafc;
+            --text-muted: #94a3b8;
+        }
+
+        body {
+            font-family: 'Work Sans', -apple-system, sans-serif;
+            background: var(--bg-dark);
+            color: var(--text-light);
+            min-height: 100vh;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            justify-content: center;
+            padding: 2rem;
+            background-image: 
+                radial-gradient(ellipse at 20% 20%, rgba(37, 99, 235, 0.15) 0%, transparent 50%),
+                radial-gradient(ellipse at 80% 80%, rgba(220, 38, 38, 0.15) 0%, transparent 50%);
+        }
+
+        .container {
+            max-width: 800px;
+            width: 100%;
+            text-align: center;
+        }
+
+        header {
+            margin-bottom: 4rem;
+        }
+
+        h1 {
+            font-family: 'Space Mono', monospace;
+            font-size: clamp(2rem, 8vw, 4rem);
+            font-weight: 700;
+            letter-spacing: -0.02em;
+            margin-bottom: 0.5rem;
+            background: linear-gradient(135deg, var(--text-light) 0%, var(--text-muted) 100%);
+            -webkit-background-clip: text;
+            -webkit-text-fill-color: transparent;
+            background-clip: text;
+        }
+
+        .subtitle {
+            font-size: 1.1rem;
+            color: var(--text-muted);
+            font-weight: 300;
+        }
+
+        .voting-area {
+            display: grid;
+            grid-template-columns: 1fr auto 1fr;
+            gap: 2rem;
+            align-items: center;
+            margin-bottom: 3rem;
+        }
+
+        .vote-btn {
+            position: relative;
+            padding: 3rem 2rem;
+            border: none;
+            border-radius: 1rem;
+            font-family: 'Space Mono', monospace;
+            font-size: 1.5rem;
+            font-weight: 700;
+            color: white;
+            cursor: pointer;
+            transition: all 0.3s cubic-bezier(0.4, 0, 0.2, 1);
+            overflow: hidden;
+            text-transform: uppercase;
+            letter-spacing: 0.05em;
+        }
+
+        .vote-btn::before {
+            content: '';
+            position: absolute;
+            top: 0;
+            left: 0;
+            right: 0;
+            bottom: 0;
+            background: linear-gradient(180deg, rgba(255,255,255,0.1) 0%, transparent 100%);
+            opacity: 0;
+            transition: opacity 0.3s;
+        }
+
+        .vote-btn:hover::before {
+            opacity: 1;
+        }
+
+        .vote-btn:hover {
+            transform: translateY(-4px) scale(1.02);
+            box-shadow: 0 20px 40px rgba(0,0,0,0.4);
+        }
+
+        .vote-btn:active {
+            transform: translateY(-2px) scale(1.01);
+        }
+
+        .btn-a {
+            background: linear-gradient(135deg, var(--color-a) 0%, #3b82f6 100%);
+        }
+
+        .btn-a:hover {
+            background: linear-gradient(135deg, var(--color-a-hover) 0%, var(--color-a) 100%);
+        }
+
+        .btn-b {
+            background: linear-gradient(135deg, var(--color-b) 0%, #ef4444 100%);
+        }
+
+        .btn-b:hover {
+            background: linear-gradient(135deg, var(--color-b-hover) 0%, var(--color-b) 100%);
+        }
+
+        .vs {
+            font-family: 'Space Mono', monospace;
+            font-size: 1.5rem;
+            font-weight: 700;
+            color: var(--text-muted);
+            opacity: 0.5;
+        }
+
+        .vote-emoji {
+            display: block;
+            font-size: 3rem;
+            margin-bottom: 1rem;
+        }
+
+        .voted-message {
+            background: rgba(255,255,255,0.05);
+            border: 1px solid rgba(255,255,255,0.1);
+            border-radius: 0.75rem;
+            padding: 1.5rem 2rem;
+            margin-bottom: 2rem;
+            animation: fadeIn 0.5s ease;
+        }
+
+        .voted-message.vote-a {
+            border-color: rgba(37, 99, 235, 0.3);
+            background: rgba(37, 99, 235, 0.1);
+        }
+
+        .voted-message.vote-b {
+            border-color: rgba(220, 38, 38, 0.3);
+            background: rgba(220, 38, 38, 0.1);
+        }
+
+        @keyframes fadeIn {
+            from { opacity: 0; transform: translateY(-10px); }
+            to { opacity: 1; transform: translateY(0); }
+        }
+
+        footer {
+            margin-top: 3rem;
+            padding-top: 2rem;
+            border-top: 1px solid rgba(255,255,255,0.1);
+            color: var(--text-muted);
+            font-size: 0.85rem;
+        }
+
+        .hostname {
+            font-family: 'Space Mono', monospace;
+            background: rgba(255,255,255,0.05);
+            padding: 0.25rem 0.75rem;
+            border-radius: 0.25rem;
+            font-size: 0.75rem;
+        }
+
+        @media (max-width: 600px) {
+            .voting-area {
+                grid-template-columns: 1fr;
+                gap: 1rem;
+            }
+
+            .vs {
+                padding: 0.5rem 0;
+            }
+
+            .vote-btn {
+                padding: 2rem 1.5rem;
+            }
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <header>
+            <h1>Make Your Choice</h1>
+            <p class="subtitle">Cast your vote and see the results in real-time</p>
+        </header>
+
+        {% if vote %}
+        <div class="voted-message vote-{{ vote }}">
+            <strong>Vote recorded!</strong> You voted for 
+            <strong>{% if vote == 'a' %}{{ option_a }}{% else %}{{ option_b }}{% endif %}</strong>.
+            You can change your vote anytime.
+        </div>
+        {% endif %}
+
+        <form method="post">
+            <div class="voting-area">
+                <button type="submit" name="vote" value="a" class="vote-btn btn-a">
+                    <span class="vote-emoji">🐱</span>
+                    {{ option_a }}
+                </button>
+                
+                <span class="vs">VS</span>
+                
+                <button type="submit" name="vote" value="b" class="vote-btn btn-b">
+                    <span class="vote-emoji">🐶</span>
+                    {{ option_b }}
+                </button>
+            </div>
+        </form>
+
+        <footer>
+            <p>Processed by container <span class="hostname">{{ hostname }}</span></p>
+        </footer>
+    </div>
+</body>
+</html>

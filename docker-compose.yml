@@ -1,0 +1,112 @@
+# Docker Compose for Voting Application
+# Run with: docker compose up --build
+# Access Vote: http://localhost:5000
+# Access Results: http://localhost:5001
+
+services:
+  # Redis - In-memory vote queue
+  redis:
+    image: redis:7-alpine
+    container_name: voting-redis
+    ports:
+      - "6379:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - voting-network
+
+  # PostgreSQL - Persistent vote storage
+  db:
+    image: postgres:15-alpine
+    container_name: voting-db
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+      POSTGRES_DB: postgres
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - voting-network
+
+  # Vote App - Frontend for casting votes
+  vote:
+    build:
+      context: ./vote
+      dockerfile: Dockerfile
+    container_name: voting-vote
+    ports:
+      - "5000:80"
+    environment:
+      - REDIS_HOST=redis
+      - REDIS_PORT=6379
+      - OPTION_A=Cats
+      - OPTION_B=Dogs
+    depends_on:
+      redis:
+        condition: service_healthy
+    networks:
+      - voting-network
+    restart: unless-stopped
+
+  # Worker - Background vote processor
+  worker:
+    build:
+      context: ./worker
+      dockerfile: Dockerfile
+    container_name: voting-worker
+    environment:
+      - REDIS_HOST=redis
+      - REDIS_PORT=6379
+      - POSTGRES_HOST=db
+      - POSTGRES_PORT=5432
+      - POSTGRES_USER=postgres
+      - POSTGRES_PASSWORD=postgres
+      - POSTGRES_DB=postgres
+    depends_on:
+      redis:
+        condition: service_healthy
+      db:
+        condition: service_healthy
+    networks:
+      - voting-network
+    restart: unless-stopped
+
+  # Result App - Frontend for viewing results
+  result:
+    build:
+      context: ./result
+      dockerfile: Dockerfile
+    container_name: voting-result
+    ports:
+      - "5001:80"
+    environment:
+      - POSTGRES_HOST=db
+      - POSTGRES_PORT=5432
+      - POSTGRES_USER=postgres
+      - POSTGRES_PASSWORD=postgres
+      - POSTGRES_DB=postgres
+      - OPTION_A=Cats
+      - OPTION_B=Dogs
+    depends_on:
+      db:
+        condition: service_healthy
+    networks:
+      - voting-network
+    restart: unless-stopped
+
+networks:
+  voting-network:
+    driver: bridge
+
+volumes:
+  postgres-data:
