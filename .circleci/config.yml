@@ -284,7 +284,7 @@ jobs:
           name: Create deployment summary
           command: |
             SHORT_SHA=${CIRCLE_SHA1:0:7}
-            cat > /tmp/k8s-manifests/DOCKERHUB-README.md << EOF
+            cat > /tmp/k8s-manifests/DOCKERHUB-README.md \<< EOF
             # DockerHub Voting App Deployment
             
             ## Build Information
@@ -435,7 +435,7 @@ jobs:
             REPO_NAME="votingapp-${ENVIRONMENT}"
             REGISTRY="us-central1-docker.pkg.dev/$GOOGLE_PROJECT_ID/$REPO_NAME"
             
-            cat > /tmp/k8s-manifests/GCP-${ENVIRONMENT}-README.md << EOF
+            cat > /tmp/k8s-manifests/GCP-${ENVIRONMENT}-README.md \<< EOF
             # GCP ${ENVIRONMENT} Voting App Deployment
             
             ## Build Information
@@ -595,7 +595,7 @@ jobs:
             AWS_ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text)
             ECR_REGISTRY="$AWS_ACCOUNT_ID.dkr.ecr.$AWS_DEFAULT_REGION.amazonaws.com"
             
-            cat > /tmp/k8s-manifests/AWS-${ENVIRONMENT}-README.md << EOF
+            cat > /tmp/k8s-manifests/AWS-${ENVIRONMENT}-README.md \<< EOF
             # AWS ${ENVIRONMENT} Voting App Deployment
             
             ## Build Information
