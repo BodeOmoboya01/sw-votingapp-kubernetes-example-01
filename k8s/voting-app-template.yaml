@@ -1,0 +1,429 @@
+# ============================================
+# Voting Application - Kubernetes Deployment Template
+# ============================================
+# This file is used as a template for generating
+# environment-specific manifests during CI/CD.
+#
+# Placeholders replaced during build:
+# - IMAGE_VOTE: Vote app image URI
+# - IMAGE_RESULT: Result app image URI  
+# - IMAGE_WORKER: Worker app image URI
+# - ENVIRONMENT: Environment name
+# ============================================
+
+---
+# ============================================
+# NAMESPACE
+# ============================================
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: votingapp
+  labels:
+    app.kubernetes.io/name: voting-app
+    app.kubernetes.io/part-of: voting-demo
+    environment: IMAGE_ENVIRONMENT
+
+---
+# ============================================
+# CONFIGMAP - Application Configuration
+# ============================================
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: voting-config
+  namespace: votingapp
+  labels:
+    app.kubernetes.io/name: voting-app
+    environment: IMAGE_ENVIRONMENT
+data:
+  OPTION_A: "Cats"
+  OPTION_B: "Dogs"
+  REDIS_HOST: "redis"
+  REDIS_PORT: "6379"
+  POSTGRES_HOST: "db"
+  POSTGRES_PORT: "5432"
+  POSTGRES_DB: "postgres"
+
+---
+# ============================================
+# SECRET - Database Credentials
+# ============================================
+apiVersion: v1
+kind: Secret
+metadata:
+  name: postgres-secret
+  namespace: votingapp
+  labels:
+    app.kubernetes.io/name: voting-app
+    environment: IMAGE_ENVIRONMENT
+type: Opaque
+stringData:
+  POSTGRES_USER: postgres
+  POSTGRES_PASSWORD: postgres
+
+---
+# ============================================
+# REDIS - In-memory cache for votes
+# ============================================
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: redis
+  namespace: votingapp
+  labels:
+    app.kubernetes.io/name: redis
+    app.kubernetes.io/component: cache
+    app.kubernetes.io/part-of: voting-demo
+    environment: IMAGE_ENVIRONMENT
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: redis
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: redis
+        app.kubernetes.io/component: cache
+        environment: IMAGE_ENVIRONMENT
+    spec:
+      containers:
+        - name: redis
+          image: redis:7-alpine
+          ports:
+            - containerPort: 6379
+              name: redis
+          resources:
+            requests:
+              memory: "64Mi"
+              cpu: "50m"
+            limits:
+              memory: "128Mi"
+              cpu: "100m"
+          livenessProbe:
+            exec:
+              command: ["redis-cli", "ping"]
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          readinessProbe:
+            exec:
+              command: ["redis-cli", "ping"]
+            initialDelaySeconds: 5
+            periodSeconds: 5
+
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: redis
+  namespace: votingapp
+  labels:
+    app.kubernetes.io/name: redis
+    environment: IMAGE_ENVIRONMENT
+spec:
+  selector:
+    app.kubernetes.io/name: redis
+  ports:
+    - protocol: TCP
+      port: 6379
+      targetPort: 6379
+
+---
+# ============================================
+# POSTGRESQL - Persistent database for results
+# ============================================
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: db
+  namespace: votingapp
+  labels:
+    app.kubernetes.io/name: postgres
+    app.kubernetes.io/component: database
+    app.kubernetes.io/part-of: voting-demo
+    environment: IMAGE_ENVIRONMENT
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: postgres
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: postgres
+        app.kubernetes.io/component: database
+        environment: IMAGE_ENVIRONMENT
+    spec:
+      containers:
+        - name: postgres
+          image: postgres:15-alpine
+          ports:
+            - containerPort: 5432
+              name: postgres
+          env:
+            - name: POSTGRES_USER
+              valueFrom:
+                secretKeyRef:
+                  name: postgres-secret
+                  key: POSTGRES_USER
+            - name: POSTGRES_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: postgres-secret
+                  key: POSTGRES_PASSWORD
+            - name: POSTGRES_HOST_AUTH_METHOD
+              value: trust
+          resources:
+            requests:
+              memory: "128Mi"
+              cpu: "100m"
+            limits:
+              memory: "256Mi"
+              cpu: "200m"
+          livenessProbe:
+            exec:
+              command: ["pg_isready", "-U", "postgres"]
+            initialDelaySeconds: 15
+            periodSeconds: 10
+          readinessProbe:
+            exec:
+              command: ["pg_isready", "-U", "postgres"]
+            initialDelaySeconds: 5
+            periodSeconds: 5
+          volumeMounts:
+            - name: postgres-storage
+              mountPath: /var/lib/postgresql/data
+      volumes:
+        - name: postgres-storage
+          emptyDir: {}
+
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: db
+  namespace: votingapp
+  labels:
+    app.kubernetes.io/name: postgres
+    environment: IMAGE_ENVIRONMENT
+spec:
+  selector:
+    app.kubernetes.io/name: postgres
+  ports:
+    - protocol: TCP
+      port: 5432
+      targetPort: 5432
+
+---
+# ============================================
+# VOTE APP - Frontend for casting votes
+# ============================================
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: vote
+  namespace: votingapp
+  labels:
+    app.kubernetes.io/name: vote
+    app.kubernetes.io/component: frontend
+    app.kubernetes.io/part-of: voting-demo
+    environment: IMAGE_ENVIRONMENT
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: vote
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: vote
+        app.kubernetes.io/component: frontend
+        environment: IMAGE_ENVIRONMENT
+    spec:
+      containers:
+        - name: vote
+          image: IMAGE_VOTE
+          imagePullPolicy: Always
+          ports:
+            - containerPort: 80
+              name: http
+          envFrom:
+            - configMapRef:
+                name: voting-config
+          resources:
+            requests:
+              memory: "64Mi"
+              cpu: "50m"
+            limits:
+              memory: "128Mi"
+              cpu: "100m"
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: 80
+            initialDelaySeconds: 10
+            periodSeconds: 15
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: 80
+            initialDelaySeconds: 5
+            periodSeconds: 5
+
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: vote
+  namespace: votingapp
+  labels:
+    app.kubernetes.io/name: vote
+    environment: IMAGE_ENVIRONMENT
+spec:
+  type: NodePort
+  selector:
+    app.kubernetes.io/name: vote
+  ports:
+    - protocol: TCP
+      port: 80
+      targetPort: 80
+      nodePort: 30005
+
+---
+# ============================================
+# RESULT APP - Frontend for viewing results
+# ============================================
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: result
+  namespace: votingapp
+  labels:
+    app.kubernetes.io/name: result
+    app.kubernetes.io/component: frontend
+    app.kubernetes.io/part-of: voting-demo
+    environment: IMAGE_ENVIRONMENT
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: result
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: result
+        app.kubernetes.io/component: frontend
+        environment: IMAGE_ENVIRONMENT
+    spec:
+      containers:
+        - name: result
+          image: IMAGE_RESULT
+          imagePullPolicy: Always
+          ports:
+            - containerPort: 80
+              name: http
+          envFrom:
+            - configMapRef:
+                name: voting-config
+          env:
+            - name: POSTGRES_USER
+              valueFrom:
+                secretKeyRef:
+                  name: postgres-secret
+                  key: POSTGRES_USER
+            - name: POSTGRES_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: postgres-secret
+                  key: POSTGRES_PASSWORD
+          resources:
+            requests:
+              memory: "64Mi"
+              cpu: "50m"
+            limits:
+              memory: "128Mi"
+              cpu: "100m"
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: 80
+            initialDelaySeconds: 10
+            periodSeconds: 15
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: 80
+            initialDelaySeconds: 5
+            periodSeconds: 5
+
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: result
+  namespace: votingapp
+  labels:
+    app.kubernetes.io/name: result
+    environment: IMAGE_ENVIRONMENT
+spec:
+  type: NodePort
+  selector:
+    app.kubernetes.io/name: result
+  ports:
+    - protocol: TCP
+      port: 80
+      targetPort: 80
+      nodePort: 30004
+
+---
+# ============================================
+# WORKER - Background vote processor
+# ============================================
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: worker
+  namespace: votingapp
+  labels:
+    app.kubernetes.io/name: worker
+    app.kubernetes.io/component: backend
+    app.kubernetes.io/part-of: voting-demo
+    environment: IMAGE_ENVIRONMENT
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: worker
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: worker
+        app.kubernetes.io/component: backend
+        environment: IMAGE_ENVIRONMENT
+    spec:
+      containers:
+        - name: worker
+          image: IMAGE_WORKER
+          imagePullPolicy: Always
+          envFrom:
+            - configMapRef:
+                name: voting-config
+          env:
+            - name: POSTGRES_USER
+              valueFrom:
+                secretKeyRef:
+                  name: postgres-secret
+                  key: POSTGRES_USER
+            - name: POSTGRES_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: postgres-secret
+                  key: POSTGRES_PASSWORD
+          resources:
+            requests:
+              memory: "64Mi"
+              cpu: "50m"
+            limits:
+              memory: "128Mi"
+              cpu: "100m"

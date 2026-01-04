@@ -1,0 +1,823 @@
+version: 2.1
+
+# ============================================
+# Voting Application - Multi-Registry CI/CD Pipeline
+# ============================================
+# Builds and pushes Docker images to:
+# - DockerHub (public)
+# - GCP Artifact Registry (staging & sandbox)
+# - AWS ECR (staging & sandbox)
+#
+# Generates K8s manifests as downloadable artifacts
+# ============================================
+
+orbs:
+  aws-cli: circleci/aws-cli@3.1
+
+# ============================================
+# EXECUTORS
+# ============================================
+executors:
+  docker-executor:
+    docker:
+      - image: cimg/base:2024.01
+    resource_class: medium
+    working_directory: ~/project
+
+  gcp-executor:
+    docker:
+      - image: google/cloud-sdk:alpine
+    resource_class: medium
+    working_directory: ~/project
+
+# ============================================
+# REUSABLE COMMANDS
+# ============================================
+commands:
+  setup-docker:
+    description: "Setup Docker buildx for multi-platform builds"
+    steps:
+      - setup_remote_docker:
+          docker_layer_caching: true
+
+  setup-gcp:
+    description: "Setup GCP authentication"
+    steps:
+      - run:
+          name: Setup GCP Authentication
+          command: |
+            echo $GOOGLE_SERVICE_ACCOUNT_KEY | base64 -d > /tmp/gcp-key.json
+            gcloud auth activate-service-account --key-file /tmp/gcp-key.json
+            gcloud config set project $GOOGLE_PROJECT_ID
+
+  build-all-images:
+    description: "Build all voting app Docker images"
+    parameters:
+      tag:
+        type: string
+        default: "latest"
+    steps:
+      - run:
+          name: Build Vote App Image
+          command: |
+            echo "🏗️ Building vote app..."
+            docker build -t vote:<< parameters.tag >> ./vote
+            echo "✅ Vote app built successfully"
+      - run:
+          name: Build Result App Image
+          command: |
+            echo "🏗️ Building result app..."
+            docker build -t result:<< parameters.tag >> ./result
+            echo "✅ Result app built successfully"
+      - run:
+          name: Build Worker App Image
+          command: |
+            echo "🏗️ Building worker app..."
+            docker build -t worker:<< parameters.tag >> ./worker
+            echo "✅ Worker app built successfully"
+
+  generate-k8s-manifest:
+    description: "Generate K8s manifest with image URIs"
+    parameters:
+      environment:
+        type: string
+      vote_image:
+        type: string
+      result_image:
+        type: string
+      worker_image:
+        type: string
+      output_dir:
+        type: string
+        default: "/tmp/k8s-manifests"
+    steps:
+      - run:
+          name: Generate K8s manifest for << parameters.environment >>
+          command: |
+            mkdir -p << parameters.output_dir >>
+            
+            # Generate manifest from template
+            sed -e "s|IMAGE_VOTE|<< parameters.vote_image >>|g" \
+                -e "s|IMAGE_RESULT|<< parameters.result_image >>|g" \
+                -e "s|IMAGE_WORKER|<< parameters.worker_image >>|g" \
+                -e "s|IMAGE_ENVIRONMENT|<< parameters.environment >>|g" \
+                k8s/voting-app-template.yaml > << parameters.output_dir >>/voting-app-<< parameters.environment >>.yaml
+            
+            echo "✅ Generated: voting-app-<< parameters.environment >>.yaml"
+            echo ""
+            echo "📦 Image URIs for << parameters.environment >>:"
+            echo "  Vote:   << parameters.vote_image >>"
+            echo "  Result: << parameters.result_image >>"
+            echo "  Worker: << parameters.worker_image >>"
+
+# ============================================
+# JOBS
+# ============================================
+jobs:
+  # Validate Dockerfiles and code structure
+  validate:
+    executor: docker-executor
+    steps:
+      - checkout
+      - run:
+          name: Validate Project Structure
+          command: |
+            echo "🔍 Validating project structure..."
+            
+            # Check required directories
+            for dir in vote result worker; do
+              if [ ! -d "$dir" ]; then
+                echo "❌ Missing directory: $dir"
+                exit 1
+              fi
+              
+              if [ ! -f "$dir/Dockerfile" ]; then
+                echo "❌ Missing Dockerfile in $dir"
+                exit 1
+              fi
+              
+              if [ ! -f "$dir/requirements.txt" ]; then
+                echo "❌ Missing requirements.txt in $dir"
+                exit 1
+              fi
+              
+              echo "✅ $dir directory validated"
+            done
+            
+            # Check template exists
+            if [ ! -f "k8s/voting-app-template.yaml" ]; then
+              echo "❌ Missing k8s/voting-app-template.yaml"
+              exit 1
+            fi
+            echo "✅ K8s template validated"
+            
+            echo "✅ All validations passed!"
+      - run:
+          name: Lint Dockerfiles
+          command: |
+            echo "🔍 Checking Dockerfile syntax..."
+            for dir in vote result worker; do
+              echo "Checking $dir/Dockerfile..."
+              if ! grep -q "^FROM" "$dir/Dockerfile"; then
+                echo "❌ Invalid Dockerfile in $dir - missing FROM instruction"
+                exit 1
+              fi
+              echo "✅ $dir/Dockerfile is valid"
+            done
+
+  # Build all images and save to workspace
+  build-images:
+    executor: docker-executor
+    steps:
+      - checkout
+      - setup-docker
+      - build-all-images:
+          tag: ${CIRCLE_SHA1:0:7}
+      - run:
+          name: Tag images with latest
+          command: |
+            docker tag vote:${CIRCLE_SHA1:0:7} vote:latest
+            docker tag result:${CIRCLE_SHA1:0:7} result:latest
+            docker tag worker:${CIRCLE_SHA1:0:7} worker:latest
+      - run:
+          name: Save Docker images
+          command: |
+            mkdir -p /tmp/docker-images
+            docker save vote:latest vote:${CIRCLE_SHA1:0:7} -o /tmp/docker-images/vote.tar
+            docker save result:latest result:${CIRCLE_SHA1:0:7} -o /tmp/docker-images/result.tar
+            docker save worker:latest worker:${CIRCLE_SHA1:0:7} -o /tmp/docker-images/worker.tar
+            echo "✅ Images saved to workspace"
+      - persist_to_workspace:
+          root: .
+          paths:
+            - k8s/voting-app-template.yaml
+      - persist_to_workspace:
+          root: /tmp
+          paths:
+            - docker-images
+
+  # Push to DockerHub
+  push-dockerhub:
+    executor: docker-executor
+    steps:
+      - attach_workspace:
+          at: .
+      - attach_workspace:
+          at: /tmp
+      - setup-docker
+      - run:
+          name: Load Docker images
+          command: |
+            docker load -i /tmp/docker-images/vote.tar
+            docker load -i /tmp/docker-images/result.tar
+            docker load -i /tmp/docker-images/worker.tar
+      - run:
+          name: Login to DockerHub
+          command: |
+            echo "$DOCKERHUB_TOKEN" | docker login -u "$DOCKERHUB_USERNAME" --password-stdin
+      - run:
+          name: Push images to DockerHub
+          command: |
+            SHORT_SHA=${CIRCLE_SHA1:0:7}
+            
+            echo "📦 Pushing to DockerHub as $DOCKERHUB_USERNAME..."
+            
+            # Vote app
+            docker tag vote:latest $DOCKERHUB_USERNAME/votingapp-vote:latest
+            docker tag vote:$SHORT_SHA $DOCKERHUB_USERNAME/votingapp-vote:$SHORT_SHA
+            docker push $DOCKERHUB_USERNAME/votingapp-vote:latest
+            docker push $DOCKERHUB_USERNAME/votingapp-vote:$SHORT_SHA
+            echo "✅ vote pushed"
+            
+            # Result app
+            docker tag result:latest $DOCKERHUB_USERNAME/votingapp-result:latest
+            docker tag result:$SHORT_SHA $DOCKERHUB_USERNAME/votingapp-result:$SHORT_SHA
+            docker push $DOCKERHUB_USERNAME/votingapp-result:latest
+            docker push $DOCKERHUB_USERNAME/votingapp-result:$SHORT_SHA
+            echo "✅ result pushed"
+            
+            # Worker app
+            docker tag worker:latest $DOCKERHUB_USERNAME/votingapp-worker:latest
+            docker tag worker:$SHORT_SHA $DOCKERHUB_USERNAME/votingapp-worker:$SHORT_SHA
+            docker push $DOCKERHUB_USERNAME/votingapp-worker:latest
+            docker push $DOCKERHUB_USERNAME/votingapp-worker:$SHORT_SHA
+            echo "✅ worker pushed"
+            
+            # Save image URIs for manifest generation
+            echo "export VOTE_IMAGE=$DOCKERHUB_USERNAME/votingapp-vote:$SHORT_SHA" >> $BASH_ENV
+            echo "export RESULT_IMAGE=$DOCKERHUB_USERNAME/votingapp-result:$SHORT_SHA" >> $BASH_ENV
+            echo "export WORKER_IMAGE=$DOCKERHUB_USERNAME/votingapp-worker:$SHORT_SHA" >> $BASH_ENV
+      - run:
+          name: Generate K8s manifest for DockerHub
+          command: |
+            SHORT_SHA=${CIRCLE_SHA1:0:7}
+            mkdir -p /tmp/k8s-manifests
+            
+            sed -e "s|IMAGE_VOTE|$DOCKERHUB_USERNAME/votingapp-vote:$SHORT_SHA|g" \
+                -e "s|IMAGE_RESULT|$DOCKERHUB_USERNAME/votingapp-result:$SHORT_SHA|g" \
+                -e "s|IMAGE_WORKER|$DOCKERHUB_USERNAME/votingapp-worker:$SHORT_SHA|g" \
+                -e "s|IMAGE_ENVIRONMENT|dockerhub|g" \
+                k8s/voting-app-template.yaml > /tmp/k8s-manifests/voting-app-dockerhub.yaml
+            
+            echo ""
+            echo "============================================"
+            echo "📦 DockerHub Deployment Ready!"
+            echo "============================================"
+            echo ""
+            echo "Images:"
+            echo "  - $DOCKERHUB_USERNAME/votingapp-vote:$SHORT_SHA"
+            echo "  - $DOCKERHUB_USERNAME/votingapp-result:$SHORT_SHA"
+            echo "  - $DOCKERHUB_USERNAME/votingapp-worker:$SHORT_SHA"
+            echo ""
+            echo "Deploy with:"
+            echo "  kubectl apply -f voting-app-dockerhub.yaml"
+            echo "============================================"
+      - run:
+          name: Create deployment summary
+          command: |
+            SHORT_SHA=${CIRCLE_SHA1:0:7}
+            cat > /tmp/k8s-manifests/DOCKERHUB-README.md << EOF
+            # DockerHub Voting App Deployment
+            
+            ## Build Information
+            - **Build SHA**: ${CIRCLE_SHA1}
+            - **Short SHA**: ${SHORT_SHA}
+            - **Build URL**: ${CIRCLE_BUILD_URL}
+            - **Build Time**: $(date -u +"%Y-%m-%dT%H:%M:%SZ")
+            
+            ## Docker Images
+            
+            | Component | Image |
+            |-----------|-------|
+            | Vote | \`$DOCKERHUB_USERNAME/votingapp-vote:$SHORT_SHA\` |
+            | Result | \`$DOCKERHUB_USERNAME/votingapp-result:$SHORT_SHA\` |
+            | Worker | \`$DOCKERHUB_USERNAME/votingapp-worker:$SHORT_SHA\` |
+            
+            ## Quick Deploy
+            
+            \`\`\`bash
+            # Deploy to any K8s cluster (k3s, minikube, kind, etc.)
+            kubectl apply -f voting-app-dockerhub.yaml
+            
+            # Check status
+            kubectl get all -n votingapp
+            
+            # Access (NodePort)
+            # Vote:   http://<node-ip>:30005
+            # Result: http://<node-ip>:30004
+            \`\`\`
+            
+            ## Clean Up
+            
+            \`\`\`bash
+            kubectl delete -f voting-app-dockerhub.yaml
+            \`\`\`
+            EOF
+      - store_artifacts:
+          path: /tmp/k8s-manifests
+          destination: dockerhub
+
+  # Push to GCP Artifact Registry
+  push-gcp:
+    parameters:
+      env:
+        type: string
+        default: "staging"
+    executor: gcp-executor
+    environment:
+      ENVIRONMENT: << parameters.env >>
+    steps:
+      - attach_workspace:
+          at: .
+      - attach_workspace:
+          at: /tmp
+      - setup_remote_docker:
+          docker_layer_caching: true
+      - setup-gcp
+      - run:
+          name: Load Docker images
+          command: |
+            docker load -i /tmp/docker-images/vote.tar
+            docker load -i /tmp/docker-images/result.tar
+            docker load -i /tmp/docker-images/worker.tar
+      - run:
+          name: Create Artifact Registry repository
+          command: |
+            echo "📦 Setting up Artifact Registry for $ENVIRONMENT..."
+            
+            REPO_NAME="votingapp-${ENVIRONMENT}"
+            
+            if ! gcloud artifacts repositories describe $REPO_NAME \
+                --location=us-central1 --project=$GOOGLE_PROJECT_ID &>/dev/null; then
+              echo "Creating new Artifact Registry repository: $REPO_NAME"
+              gcloud artifacts repositories create $REPO_NAME \
+                --repository-format=docker \
+                --location=us-central1 \
+                --description="Voting App Docker images for $ENVIRONMENT" \
+                --project=$GOOGLE_PROJECT_ID
+            else
+              echo "Repository already exists: $REPO_NAME"
+            fi
+      - run:
+          name: Configure Docker for GCP
+          command: |
+            gcloud auth configure-docker us-central1-docker.pkg.dev --quiet
+      - run:
+          name: Push images to GCP Artifact Registry
+          command: |
+            SHORT_SHA=${CIRCLE_SHA1:0:7}
+            REPO_NAME="votingapp-${ENVIRONMENT}"
+            REGISTRY="us-central1-docker.pkg.dev/$GOOGLE_PROJECT_ID/$REPO_NAME"
+            
+            echo "📦 Pushing to GCP Artifact Registry ($ENVIRONMENT)..."
+            
+            # Vote app
+            docker tag vote:latest $REGISTRY/vote:latest
+            docker tag vote:$SHORT_SHA $REGISTRY/vote:$SHORT_SHA
+            docker push $REGISTRY/vote:latest
+            docker push $REGISTRY/vote:$SHORT_SHA
+            echo "✅ vote pushed"
+            
+            # Result app
+            docker tag result:latest $REGISTRY/result:latest
+            docker tag result:$SHORT_SHA $REGISTRY/result:$SHORT_SHA
+            docker push $REGISTRY/result:latest
+            docker push $REGISTRY/result:$SHORT_SHA
+            echo "✅ result pushed"
+            
+            # Worker app
+            docker tag worker:latest $REGISTRY/worker:latest
+            docker tag worker:$SHORT_SHA $REGISTRY/worker:$SHORT_SHA
+            docker push $REGISTRY/worker:latest
+            docker push $REGISTRY/worker:$SHORT_SHA
+            echo "✅ worker pushed"
+      - run:
+          name: Generate K8s manifest for GCP
+          command: |
+            SHORT_SHA=${CIRCLE_SHA1:0:7}
+            REPO_NAME="votingapp-${ENVIRONMENT}"
+            REGISTRY="us-central1-docker.pkg.dev/$GOOGLE_PROJECT_ID/$REPO_NAME"
+            
+            mkdir -p /tmp/k8s-manifests
+            
+            sed -e "s|IMAGE_VOTE|$REGISTRY/vote:$SHORT_SHA|g" \
+                -e "s|IMAGE_RESULT|$REGISTRY/result:$SHORT_SHA|g" \
+                -e "s|IMAGE_WORKER|$REGISTRY/worker:$SHORT_SHA|g" \
+                -e "s|IMAGE_ENVIRONMENT|gcp-$ENVIRONMENT|g" \
+                k8s/voting-app-template.yaml > /tmp/k8s-manifests/voting-app-gcp-${ENVIRONMENT}.yaml
+            
+            echo ""
+            echo "============================================"
+            echo "📦 GCP $ENVIRONMENT Deployment Ready!"
+            echo "============================================"
+            echo ""
+            echo "Images:"
+            echo "  - $REGISTRY/vote:$SHORT_SHA"
+            echo "  - $REGISTRY/result:$SHORT_SHA"
+            echo "  - $REGISTRY/worker:$SHORT_SHA"
+            echo ""
+            echo "Deploy with:"
+            echo "  kubectl apply -f voting-app-gcp-${ENVIRONMENT}.yaml"
+            echo "============================================"
+      - run:
+          name: Create deployment summary
+          command: |
+            SHORT_SHA=${CIRCLE_SHA1:0:7}
+            REPO_NAME="votingapp-${ENVIRONMENT}"
+            REGISTRY="us-central1-docker.pkg.dev/$GOOGLE_PROJECT_ID/$REPO_NAME"
+            
+            cat > /tmp/k8s-manifests/GCP-${ENVIRONMENT}-README.md << EOF
+            # GCP ${ENVIRONMENT} Voting App Deployment
+            
+            ## Build Information
+            - **Build SHA**: ${CIRCLE_SHA1}
+            - **Short SHA**: ${SHORT_SHA}
+            - **Build URL**: ${CIRCLE_BUILD_URL}
+            - **Build Time**: $(date -u +"%Y-%m-%dT%H:%M:%SZ")
+            - **GCP Project**: ${GOOGLE_PROJECT_ID}
+            - **Registry**: ${REGISTRY}
+            
+            ## Docker Images
+            
+            | Component | Image |
+            |-----------|-------|
+            | Vote | \`${REGISTRY}/vote:${SHORT_SHA}\` |
+            | Result | \`${REGISTRY}/result:${SHORT_SHA}\` |
+            | Worker | \`${REGISTRY}/worker:${SHORT_SHA}\` |
+            
+            ## Quick Deploy to GKE
+            
+            \`\`\`bash
+            # Authenticate with GKE cluster
+            gcloud container clusters get-credentials <cluster-name> --zone <zone> --project $GOOGLE_PROJECT_ID
+            
+            # Deploy
+            kubectl apply -f voting-app-gcp-${ENVIRONMENT}.yaml
+            
+            # Check status
+            kubectl get all -n votingapp
+            
+            # Access (NodePort)
+            # Vote:   http://<node-ip>:30005
+            # Result: http://<node-ip>:30004
+            \`\`\`
+            
+            ## Clean Up
+            
+            \`\`\`bash
+            kubectl delete -f voting-app-gcp-${ENVIRONMENT}.yaml
+            \`\`\`
+            EOF
+      - store_artifacts:
+          path: /tmp/k8s-manifests
+          destination: gcp-<< parameters.env >>
+
+  # Push to AWS ECR
+  push-aws:
+    parameters:
+      env:
+        type: string
+        default: "staging"
+    executor: docker-executor
+    environment:
+      ENVIRONMENT: << parameters.env >>
+    steps:
+      - attach_workspace:
+          at: .
+      - attach_workspace:
+          at: /tmp
+      - setup-docker
+      - aws-cli/setup
+      - run:
+          name: Load Docker images
+          command: |
+            docker load -i /tmp/docker-images/vote.tar
+            docker load -i /tmp/docker-images/result.tar
+            docker load -i /tmp/docker-images/worker.tar
+      - run:
+          name: Create ECR repositories
+          command: |
+            echo "📦 Setting up ECR repositories for $ENVIRONMENT..."
+            
+            for app in vote result worker; do
+              REPO_NAME="votingapp-${ENVIRONMENT}-${app}"
+              
+              if ! aws ecr describe-repositories --repository-names $REPO_NAME --region $AWS_DEFAULT_REGION &>/dev/null; then
+                echo "Creating ECR repository: $REPO_NAME"
+                aws ecr create-repository \
+                  --repository-name $REPO_NAME \
+                  --region $AWS_DEFAULT_REGION \
+                  --image-scanning-configuration scanOnPush=true \
+                  --encryption-configuration encryptionType=AES256
+              else
+                echo "Repository already exists: $REPO_NAME"
+              fi
+            done
+      - run:
+          name: Login to ECR
+          command: |
+            AWS_ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text)
+            aws ecr get-login-password --region $AWS_DEFAULT_REGION | \
+              docker login --username AWS --password-stdin $AWS_ACCOUNT_ID.dkr.ecr.$AWS_DEFAULT_REGION.amazonaws.com
+      - run:
+          name: Push images to AWS ECR
+          command: |
+            SHORT_SHA=${CIRCLE_SHA1:0:7}
+            AWS_ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text)
+            ECR_REGISTRY="$AWS_ACCOUNT_ID.dkr.ecr.$AWS_DEFAULT_REGION.amazonaws.com"
+            
+            echo "📦 Pushing to AWS ECR ($ENVIRONMENT)..."
+            
+            # Vote app
+            VOTE_REPO="votingapp-${ENVIRONMENT}-vote"
+            docker tag vote:latest $ECR_REGISTRY/$VOTE_REPO:latest
+            docker tag vote:$SHORT_SHA $ECR_REGISTRY/$VOTE_REPO:$SHORT_SHA
+            docker push $ECR_REGISTRY/$VOTE_REPO:latest
+            docker push $ECR_REGISTRY/$VOTE_REPO:$SHORT_SHA
+            echo "✅ vote pushed"
+            
+            # Result app
+            RESULT_REPO="votingapp-${ENVIRONMENT}-result"
+            docker tag result:latest $ECR_REGISTRY/$RESULT_REPO:latest
+            docker tag result:$SHORT_SHA $ECR_REGISTRY/$RESULT_REPO:$SHORT_SHA
+            docker push $ECR_REGISTRY/$RESULT_REPO:latest
+            docker push $ECR_REGISTRY/$RESULT_REPO:$SHORT_SHA
+            echo "✅ result pushed"
+            
+            # Worker app
+            WORKER_REPO="votingapp-${ENVIRONMENT}-worker"
+            docker tag worker:latest $ECR_REGISTRY/$WORKER_REPO:latest
+            docker tag worker:$SHORT_SHA $ECR_REGISTRY/$WORKER_REPO:$SHORT_SHA
+            docker push $ECR_REGISTRY/$WORKER_REPO:latest
+            docker push $ECR_REGISTRY/$WORKER_REPO:$SHORT_SHA
+            echo "✅ worker pushed"
+      - run:
+          name: Generate K8s manifest for AWS
+          command: |
+            SHORT_SHA=${CIRCLE_SHA1:0:7}
+            AWS_ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text)
+            ECR_REGISTRY="$AWS_ACCOUNT_ID.dkr.ecr.$AWS_DEFAULT_REGION.amazonaws.com"
+            
+            mkdir -p /tmp/k8s-manifests
+            
+            sed -e "s|IMAGE_VOTE|$ECR_REGISTRY/votingapp-${ENVIRONMENT}-vote:$SHORT_SHA|g" \
+                -e "s|IMAGE_RESULT|$ECR_REGISTRY/votingapp-${ENVIRONMENT}-result:$SHORT_SHA|g" \
+                -e "s|IMAGE_WORKER|$ECR_REGISTRY/votingapp-${ENVIRONMENT}-worker:$SHORT_SHA|g" \
+                -e "s|IMAGE_ENVIRONMENT|aws-$ENVIRONMENT|g" \
+                k8s/voting-app-template.yaml > /tmp/k8s-manifests/voting-app-aws-${ENVIRONMENT}.yaml
+            
+            echo ""
+            echo "============================================"
+            echo "📦 AWS $ENVIRONMENT Deployment Ready!"
+            echo "============================================"
+            echo ""
+            echo "Images:"
+            echo "  - $ECR_REGISTRY/votingapp-${ENVIRONMENT}-vote:$SHORT_SHA"
+            echo "  - $ECR_REGISTRY/votingapp-${ENVIRONMENT}-result:$SHORT_SHA"
+            echo "  - $ECR_REGISTRY/votingapp-${ENVIRONMENT}-worker:$SHORT_SHA"
+            echo ""
+            echo "Deploy with:"
+            echo "  kubectl apply -f voting-app-aws-${ENVIRONMENT}.yaml"
+            echo "============================================"
+      - run:
+          name: Create deployment summary
+          command: |
+            SHORT_SHA=${CIRCLE_SHA1:0:7}
+            AWS_ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text)
+            ECR_REGISTRY="$AWS_ACCOUNT_ID.dkr.ecr.$AWS_DEFAULT_REGION.amazonaws.com"
+            
+            cat > /tmp/k8s-manifests/AWS-${ENVIRONMENT}-README.md << EOF
+            # AWS ${ENVIRONMENT} Voting App Deployment
+            
+            ## Build Information
+            - **Build SHA**: ${CIRCLE_SHA1}
+            - **Short SHA**: ${SHORT_SHA}
+            - **Build URL**: ${CIRCLE_BUILD_URL}
+            - **Build Time**: $(date -u +"%Y-%m-%dT%H:%M:%SZ")
+            - **AWS Account**: ${AWS_ACCOUNT_ID}
+            - **AWS Region**: ${AWS_DEFAULT_REGION}
+            - **ECR Registry**: ${ECR_REGISTRY}
+            
+            ## Docker Images
+            
+            | Component | Image |
+            |-----------|-------|
+            | Vote | \`${ECR_REGISTRY}/votingapp-${ENVIRONMENT}-vote:${SHORT_SHA}\` |
+            | Result | \`${ECR_REGISTRY}/votingapp-${ENVIRONMENT}-result:${SHORT_SHA}\` |
+            | Worker | \`${ECR_REGISTRY}/votingapp-${ENVIRONMENT}-worker:${SHORT_SHA}\` |
+            
+            ## Quick Deploy to EKS
+            
+            \`\`\`bash
+            # Authenticate with EKS cluster
+            aws eks update-kubeconfig --name <cluster-name> --region ${AWS_DEFAULT_REGION}
+            
+            # Deploy
+            kubectl apply -f voting-app-aws-${ENVIRONMENT}.yaml
+            
+            # Check status
+            kubectl get all -n votingapp
+            
+            # Access (NodePort)
+            # Vote:   http://<node-ip>:30005
+            # Result: http://<node-ip>:30004
+            \`\`\`
+            
+            ## Clean Up
+            
+            \`\`\`bash
+            kubectl delete -f voting-app-aws-${ENVIRONMENT}.yaml
+            \`\`\`
+            EOF
+      - store_artifacts:
+          path: /tmp/k8s-manifests
+          destination: aws-<< parameters.env >>
+
+# ============================================
+# WORKFLOWS
+# ============================================
+workflows:
+  version: 2
+
+  # Validate on feature branches
+  validate-branch:
+    jobs:
+      - validate:
+          filters:
+            branches:
+              ignore: main
+
+  # Build and push to all registries on main
+  build-and-push-all:
+    jobs:
+      # Step 1: Validate
+      - validate:
+          filters:
+            branches:
+              only: main
+
+      # Step 2: Build all images
+      - build-images:
+          requires:
+            - validate
+          filters:
+            branches:
+              only: main
+
+      # Step 3: Push to DockerHub (parallel with approval)
+      - hold-dockerhub:
+          type: approval
+          requires:
+            - build-images
+          filters:
+            branches:
+              only: main
+
+      - push-dockerhub:
+          context: dockerhub
+          requires:
+            - hold-dockerhub
+          filters:
+            branches:
+              only: main
+
+      # Step 4: Push to GCP Staging
+      - hold-gcp-staging:
+          type: approval
+          requires:
+            - build-images
+          filters:
+            branches:
+              only: main
+
+      - push-gcp:
+          name: push-gcp-staging
+          env: staging
+          context: gcp-staging
+          requires:
+            - hold-gcp-staging
+          filters:
+            branches:
+              only: main
+
+      # Step 5: Push to GCP Sandbox (after staging)
+      - hold-gcp-sandbox:
+          type: approval
+          requires:
+            - push-gcp-staging
+          filters:
+            branches:
+              only: main
+
+      - push-gcp:
+          name: push-gcp-sandbox
+          env: sandbox
+          context: gcp-sandbox
+          requires:
+            - hold-gcp-sandbox
+          filters:
+            branches:
+              only: main
+
+      # Step 6: Push to AWS Staging
+      - hold-aws-staging:
+          type: approval
+          requires:
+            - build-images
+          filters:
+            branches:
+              only: main
+
+      - push-aws:
+          name: push-aws-staging
+          env: staging
+          context: aws-staging
+          requires:
+            - hold-aws-staging
+          filters:
+            branches:
+              only: main
+
+      # Step 7: Push to AWS Sandbox (after staging)
+      - hold-aws-sandbox:
+          type: approval
+          requires:
+            - push-aws-staging
+          filters:
+            branches:
+              only: main
+
+      - push-aws:
+          name: push-aws-sandbox
+          env: sandbox
+          context: aws-sandbox
+          requires:
+            - hold-aws-sandbox
+          filters:
+            branches:
+              only: main
+
+  # Quick push workflow (skips approvals for faster iteration)
+  quick-push:
+    jobs:
+      - hold-quick-push:
+          type: approval
+          filters:
+            branches:
+              only: main
+
+      - build-images:
+          requires:
+            - hold-quick-push
+          filters:
+            branches:
+              only: main
+
+      # Push to all registries in parallel
+      - push-dockerhub:
+          context: dockerhub
+          requires:
+            - build-images
+          filters:
+            branches:
+              only: main
+
+      - push-gcp:
+          name: quick-push-gcp-staging
+          env: staging
+          context: gcp-staging
+          requires:
+            - build-images
+          filters:
+            branches:
+              only: main
+
+      - push-gcp:
+          name: quick-push-gcp-sandbox
+          env: sandbox
+          context: gcp-sandbox
+          requires:
+            - build-images
+          filters:
+            branches:
+              only: main
+
+      - push-aws:
+          name: quick-push-aws-staging
+          env: staging
+          context: aws-staging
+          requires:
+            - build-images
+          filters:
+            branches:
+              only: main
+
+      - push-aws:
+          name: quick-push-aws-sandbox
+          env: sandbox
+          context: aws-sandbox
+          requires:
+            - build-images
+          filters:
+            branches:
+              only: main

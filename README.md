@@ -4,14 +4,14 @@ A modern, microservices-based voting application perfect for Kubernetes tutorial
 
 ## Architecture
 
-```
+```chart
 ┌─────────────────────────────────────────────────────────────────────────────┐
 │                           Voting Application                                │
 ├─────────────────────────────────────────────────────────────────────────────┤
 │                                                                             │
 │   ┌───────────┐      ┌─────────┐      ┌────────┐      ┌──────────────┐     │
 │   │           │      │         │      │        │      │              │     │
-│   │   Vote    │─────▶│  Redis  │─────▶│ Worker │─────▶│  PostgreSQL  │     │
+│   │   Vote    │─────▶│  Redis  │─────▶│ Worker │─────▶│  PostgreSQL │    │
 │   │   (Web)   │      │ (Queue) │      │        │      │    (DB)      │     │
 │   │           │      │         │      │        │      │              │     │
 │   └───────────┘      └─────────┘      └────────┘      └──────────────┘     │
@@ -37,6 +37,78 @@ A modern, microservices-based voting application perfect for Kubernetes tutorial
 | **Worker** | Python | Background processor (Redis → PostgreSQL) |
 | **Redis** | Redis 7 | In-memory queue for votes |
 | **PostgreSQL** | PostgreSQL 15 | Persistent storage for results |
+
+## CI/CD Pipeline
+
+This project uses CircleCI to build and push Docker images to multiple registries.
+
+### Pipeline Overview
+
+```chart
+┌─────────────┐     ┌─────────────┐     ┌─────────────────────────────────────┐
+│  Validate   │────▶│   Build     │────▶│           Push to Registries        │
+│  (on push)  │     │  All Images │     │                                     │
+└─────────────┘     └─────────────┘     │  ┌─────────────┐                    │
+                                        │  │  DockerHub  │ (public images)    │
+                                        │  └─────────────┘                    │
+                                        │  ┌─────────────┐  ┌─────────────┐   │
+                                        │  │GCP Staging  │─▶│GCP Sandbox  │   │
+                                        │  └─────────────┘  └─────────────┘   │
+                                        │  ┌─────────────┐  ┌─────────────┐   │
+                                        │  │AWS Staging  │─▶│AWS Sandbox  │   │
+                                        │  └─────────────┘  └─────────────┘   │
+                                        └─────────────────────────────────────┘
+```
+
+### Required CircleCI Contexts
+
+Configure the following contexts in CircleCI:
+
+#### `dockerhub` Context
+| Variable | Description |
+|----------|-------------|
+| `DOCKERHUB_USERNAME` | Your DockerHub username |
+| `DOCKERHUB_TOKEN` | DockerHub access token (not password) |
+
+#### `gcp-staging` and `gcp-sandbox` Contexts
+| Variable | Description |
+|----------|-------------|
+| `GOOGLE_SERVICE_ACCOUNT_KEY` | Base64-encoded service account JSON key |
+| `GOOGLE_PROJECT_ID` | GCP project ID |
+
+#### `aws-staging` and `aws-sandbox` Contexts
+| Variable | Description |
+|----------|-------------|
+| `AWS_ACCESS_KEY_ID` | AWS access key ID |
+| `AWS_SECRET_ACCESS_KEY` | AWS secret access key |
+| `AWS_DEFAULT_REGION` | AWS region (e.g., `us-east-1`) |
+
+### Workflows
+
+1. **validate-branch**: Runs on all branches except `main` - validates project structure
+2. **build-and-push-all**: Runs on `main` - builds and pushes to all registries with approvals
+3. **quick-push**: Manual trigger to push to all registries without individual approvals
+
+### Image Naming Convention
+
+| Registry | Image Names |
+|----------|-------------|
+| DockerHub | `{username}/votingapp-vote`, `{username}/votingapp-result`, `{username}/votingapp-worker` |
+| GCP | `us-central1-docker.pkg.dev/{project}/votingapp-{env}/vote`, etc. |
+| AWS ECR | `{account}.dkr.ecr.{region}.amazonaws.com/votingapp-{env}-vote`, etc. |
+
+### Triggering Builds
+
+Push to `main` branch:
+```bash
+git add .
+git commit -m "Update voting app"
+git push origin main
+```
+
+Then approve the deployments in CircleCI UI.
+
+---
 
 ## Quick Start
 
@@ -170,11 +242,14 @@ Change `OPTION_A` and `OPTION_B` in:
 - **Production Ready**: Uses Gunicorn for Python apps
 - **Security**: Non-root containers
 - **Kubernetes Ready**: ConfigMaps, Secrets, proper labels
+- **Multi-Registry CI/CD**: Automated builds to DockerHub, GCP, and AWS
 
 ## Project Structure
 
 ```
 voting-app/
+├── .circleci/
+│   └── config.yml          # CircleCI pipeline configuration
 ├── docker-compose.yml      # Local development setup
 ├── README.md               # This file
 ├── vote/                   # Vote frontend
@@ -237,6 +312,16 @@ kubectl logs -l app.kubernetes.io/name=worker -n votingapp
 ```bash
 # Verify Redis is running
 kubectl exec -it <redis-pod> -n votingapp -- redis-cli ping
+```
+
+### CircleCI Pipeline Issues
+
+```bash
+# Validate CircleCI config locally
+circleci config validate .circleci/config.yml
+
+# Check context variables are set correctly in CircleCI UI
+# Organization Settings > Contexts
 ```
 
 ## License
